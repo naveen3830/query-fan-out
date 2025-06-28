@@ -2,292 +2,342 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import json
+import re
 import requests
 from bs4 import BeautifulSoup
-import hashlib
-import os
-from dotenv import load_dotenv
-load_dotenv()
+import time
+from urllib.parse import urljoin, urlparse
+import math
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-st.set_page_config(page_title="Qforia Content Optimizer", layout="wide")
-st.title("💡 Qforia: Content Gap Analysis via Query Fan-Out")
-st.markdown("A two-step tool to align your content with the underlying intent of a search query.")
-
-if 'search_plan' not in st.session_state:
-    st.session_state.search_plan = None
-if 'current_query_hash' not in st.session_state:
-    st.session_state.current_query_hash = None
-if 'gemini_configured' not in st.session_state:
-    st.session_state.gemini_configured = False
+st.set_page_config(page_title="Content Gap Analyzer", layout="wide")
+st.title("🔍 Query-fan-out simulator & Content Analysis")
 
 st.sidebar.header("Configuration")
-gemini_key = st.sidebar.text_input("Enter your Gemini API Key", type="password", help="Get Your Key from Google Cloud Console.")
-user_query = st.sidebar.text_area("Enter your target query or prompt", "How does OT security impact manufacturing?", height=100)
+gemini_key = st.sidebar.text_input("Gemini API Key", type="password")
+user_query = st.sidebar.text_area("Enter your query", "what is quantum key encryption?", height=120)
+mode = st.sidebar.radio("Analysis Mode", ["Simple Analysis", "Deep Analysis"])
 
-def get_query_hash(query):
-    """Create a hash of the query to detect changes"""
-    return hashlib.md5(query.encode()).hexdigest()
-
-current_hash = get_query_hash(user_query)
-if st.session_state.current_query_hash != current_hash:
-    # Query has changed, reset the search plan
-    st.session_state.search_plan = None
-    st.session_state.current_query_hash = current_hash
-def configure_gemini(api_key):
-    """Configure Gemini model"""
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
-        st.session_state.gemini_configured = True
-        return model
-    except Exception as e:
-        st.error(f"Failed to configure Gemini: {e}")
-        st.session_state.gemini_configured = False
-        return None
-
-model = None
 if gemini_key:
-    model = configure_gemini(gemini_key)
-    if not model:
-        st.error("Gemini model could not be initialized. Please check your API key.")
-        st.stop()
+    genai.configure(api_key=gemini_key)
+    model = genai.GenerativeModel("gemini-1.5-flash-latest")
 else:
-    st.info("Please enter your Gemini API Key in the sidebar to begin.")
+    st.error("Please enter your Gemini API Key to proceed.")
     st.stop()
 
-def create_search_plan_prompt(user_query):
-    """Creates a prompt to generate the Analysis and Parallel Search Queries."""
-    return f"""
-You are the "Orchestrator" component of a state-of-the-art generative search engine. Your mission is to deconstruct a complex user query into a plan for gathering facts.
+def CONTENT_GAP_QUERY_PROMPT(q, mode):
+    min_queries_simple = 10
+    min_queries_complex = 20
+    
+    if mode == "Simple Analysis":
+        num_queries_instruction = (
+            f"Analyze the user's query: \"{q}\" for content gap analysis. "
+            f"Generate **at least {min_queries_simple}** queries that would help identify content gaps. "
+            f"Focus on variations that competitors might rank for but current content might miss. "
+            f"Include long-tail variations, question-based queries, and related search intents."
+        )
+    else:  # Deep Analysis
+        num_queries_instruction = (
+            f"Analyze the user's query: \"{q}\" for comprehensive content gap analysis. "
+            f"Generate **at least {min_queries_complex}** queries for deep content analysis. "
+            f"Include semantic variations, user journey stages, related topics, and competitive angles. "
+            f"Consider informational, transactional, and navigational search intents."
+        )
 
-**User's Original Query:** "{user_query}"
-
-**Your Task:**
-Generate a single, valid JSON object representing the search plan. This plan MUST contain two top-level keys: `query_analysis` and `parallel_search_queries`.
-
-**1. `query_analysis` Object:**
-- `primary_entities`: Identify the main subjects.
-- `key_attributes_and_constraints`: Identify the critical properties and conditions.
-- `underlying_user_intent`: Describe the user's ultimate goal in one sentence.
-
-**2. `parallel_search_queries` Array (The Fan-Out):**
-Design a list of atomic, fact-finding queries to be executed in parallel. Each query object should have:
-- `query_id`: A unique identifier (e.g., "Q1", "Q2").
-- `query_type`: The type of system this query targets (e.g., "Definitional", "Impact_Analysis", "Best_Practices", "Risk_Assessment", "Comparative").
-- `query_string`: The precise, machine-readable query.
-- `purpose`: A brief explanation of why this specific fact is needed.
-
-Generate 8-12 diverse queries that comprehensively cover the user's information needs.
-
-Your entire output must be only the JSON object, no additional text or formatting.
-"""
-
-def create_content_analysis_prompt(queries_df, blog_text, original_query):
-    """Creates a prompt to compare a blog post against a set of queries."""
-    queries_json = queries_df.to_json(orient='records', indent=2)
-    return f"""
-You are a world-class SEO Content Strategist and Editor. Your task is to analyze a blog post to see how well it answers a comprehensive set of underlying user questions related to the target query: "{original_query}"
-
-**CONTEXT:**
-
-**1. The Ideal Search Plan (Fan-Out Queries):**
-Here is a JSON array of ideal questions a user implicitly has when they search for the target topic. An ideal piece of content should address most of these.
-```json
-{queries_json}
-```
-
-**2. The Blog Post Content:**
-Here is the text content scraped from the blog post you need to analyze.
-
-```
-{blog_text[:15000]}
-```
-
-(Note: Content may be truncated for brevity)
-
-**YOUR ANALYSIS & RECOMMENDATION TASK:**
-
-Based on the provided content and the ideal search plan, provide a detailed analysis and actionable recommendations. Structure your response in clean Markdown with the following sections:
-
-### 1. Overall Alignment Score
-Give a score out of 10 for how well the current content satisfies the user's full intent as represented by the search queries. Provide a one-sentence justification.
-
-### 2. Coverage Analysis (What the Blog Does Well)
-List the query_ids from the search plan that the blog post answers effectively. For each query_id, briefly quote or reference the specific part of the blog text that satisfies the query.
-
-### 3. Content Gap Analysis (Missed Opportunities)
-List the query_ids from the search plan that the blog post answers poorly or completely misses. For each missed query, explain what information is missing.
-
-### 4. Actionable Recommendations for Improvement
-Provide specific, concrete suggestions to fill the identified gaps. Be prescriptive and actionable.
-
-Example Good Recommendation: "To address Q5 and Q8, add a new H2 section titled 'Top 5 Security Risks in Manufacturing OT Environments' and include a bulleted list detailing threats like ransomware, insider threats, and supply chain vulnerabilities."
-
-### 5. Content Quality Assessment
-Comment on the overall quality, readability, and structure of the existing content.
-
-Your entire output must be in Markdown format and be thorough in your analysis.
-"""
-
-def generate_from_gemini(prompt, is_json=True):
-    """Generic function to call Gemini and handle responses."""
+    return (
+        f"You are generating queries for content gap analysis and competitive research.\n"
+        f"Original query: \"{q}\". Analysis mode: \"{mode}\".\n\n"
+        f"**Task: Determine optimal number of queries and generate them for content analysis.**\n"
+        f"{num_queries_instruction}\n\n"
+        f"Each query should help identify potential content gaps by covering:\n"
+        f"1. Semantic Variations - Different ways to express the same intent\n"
+        f"2. Related Questions - What users commonly ask about this topic\n"
+        f"3. Long-tail Keywords - Specific, detailed queries\n"
+        f"4. Comparison Queries - Competitive analysis angles\n"
+        f"5. Problem-Solution Queries - Pain points and solutions\n"
+        f"6. Feature-Specific Queries - Detailed aspects of the topic\n\n"
+        f"Focus on queries that would reveal content opportunities when analyzing competitor content.\n"
+        f"Avoid queries requiring real-time data or personal information.\n\n"
+        f"Return valid JSON in this format:\n"
+        f"{{\n"
+        f"  \"analysis_details\": {{\n"
+        f"    \"target_query_count\": 12,\n"
+        f"    \"reasoning_for_count\": \"Explanation of why this number was chosen\",\n"
+        f"    \"analysis_focus\": \"Content gap identification and competitive analysis\"\n"
+        f"  }},\n"
+        f"  \"content_gap_queries\": [\n"
+        f"    {{\n"
+        f"      \"query\": \"Example query\",\n"
+        f"      \"type\": \"semantic_variation\",\n"
+        f"      \"search_intent\": \"informational\",\n"
+        f"      \"gap_potential\": \"high\",\n"
+        f"      \"reasoning\": \"Why this query helps identify content gaps\"\n"
+        f"    }}\n"
+        f"  ]\n"
+        f"}}"
+    )
+    
+def generate_content_gap_queries(query, mode):
+    prompt = CONTENT_GAP_QUERY_PROMPT(query, mode)
     try:
-        if is_json:
-            response = model.generate_content(
-                prompt, 
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "temperature": 0.3
-                }
-            )
-            response_text = response.text.strip()
-            if response_text.startswith('```json'):
-                response_text = response_text[7:]
-            if response_text.endswith('```'):
-                response_text = response_text[:-3]
-            return json.loads(response_text)
-        else:
-            response = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.3}
-            )
-            return response.text
+        response = model.generate_content(prompt)
+        json_text = response.text.strip()
+        
+        if json_text.startswith("```json"):
+            json_text = json_text[7:]
+        if json_text.endswith("```"):
+            json_text = json_text[:-3]
+        json_text = json_text.strip()
+
+        data = json.loads(json_text)
+        analysis_details = data.get("analysis_details", {})
+        generated_queries = data.get("content_gap_queries", [])
+
+        st.session_state.analysis_details = analysis_details
+        st.session_state.all_queries = generated_queries
+
+        return generated_queries
     except json.JSONDecodeError as e:
-        st.error(f"🔴 JSON parsing error: {e}")
-        if 'response' in locals():
-            st.code(response.text, language="text")
+        st.error(f"🔴 Failed to parse response as JSON: {e}")
+        st.text("Raw response:")
+        st.text(json_text if 'json_text' in locals() else "N/A")
         return None
     except Exception as e:
-        st.error(f"🔴 An error occurred with the Gemini API: {e}")
-        if 'response' in locals() and hasattr(response, 'text'):
-            st.code(response.text, language="text")
+        st.error(f"🔴 Error during query generation: {e}")
         return None
 
-def scrape_blog_content(url):
-    """Scrapes and cleans the text content from a given blog URL."""
+def scrape_content(url):
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Remove unwanted elements
-        for element in soup(["script", "style", "nav", "footer", "header", "aside", "form", "button"]):
-            element.decompose()
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
         
-        # Focus on main content areas
-        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_='content') or soup.body
-        
-        if main_content:
-            text = main_content.get_text()
-        else:
-            text = soup.get_text()
-        
+        text = soup.get_text()
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
+        text = ' '.join(chunk for chunk in chunks if chunk)
         
-        lines = text.split('\n')
-        cleaned_lines = [line for line in lines if len(line) > 20 or line.strip() == '']
-        text = '\n'.join(cleaned_lines)
-        
-        if not text or len(text) < 100:
-            return None, "The scraper could not find substantial readable text content on the page."
-        
-        return text, None
-    except requests.exceptions.RequestException as e:
-        return None, f"Failed to fetch the URL. Error: {e}"
+        return text[:5000] if len(text) > 5000 else text
     except Exception as e:
-        return None, f"An error occurred while scraping: {e}"
+        return f"Error scraping {url}: {str(e)}"
 
-st.header("Step 1: Generate the Search & Content Plan")
-st.markdown("Enter a target query your customers use. We'll deconstruct it into the underlying questions they really have.")
+def analyze_content_gaps_batch(queries_batch, scraped_contents):
+    if not scraped_contents:
+        return None
+    
+    content_summary = "\n\n".join([f"URL {i+1} Content:\n{content[:1000]}..." 
+                                for i, content in enumerate(scraped_contents) if content])
+    
+    queries_text = "\n".join([f"- {q['query']}" for q in queries_batch])
+    
+    analysis_prompt = f"""
+    Analyze the following scraped content against these queries to identify content gaps:
 
-# Show current query being analyzed
-if user_query.strip():
-    st.info(f"**Current Query:** {user_query}")
+    QUERIES TO ANALYZE:
+    {queries_text}
 
-if st.button("Generate Search Plan 🚀", key="generate_plan"):
-    if user_query.strip():
-        # Force reset of search plan for new generation
-        st.session_state.search_plan = None
+    SCRAPED CONTENT:
+    {content_summary}
+
+    For each query, determine:
+    1. Coverage Score (0-10): How well the content covers this query
+    2. Content Gaps: What specific information is missing
+    3. Optimization Opportunities: How to improve content for this query
+    4. Competitive Advantage: Potential to outrank competitors
+
+    Return JSON format:
+    {{
+        "batch_analysis": [
+            {{
+                "query": "query text",
+                "coverage_score": 7,
+                "gaps_identified": ["gap1", "gap2"],
+                "optimization_opportunities": ["opportunity1", "opportunity2"],
+                "competitive_potential": "high/medium/low"
+            }}
+        ],
+        "overall_insights": {{
+            "strongest_areas": ["area1", "area2"],
+            "biggest_gaps": ["gap1", "gap2"],
+            "quick_wins": ["win1", "win2"]
+        }}
+    }}
+    """
+    
+    try:
+        response = model.generate_content(analysis_prompt)
+        json_text = response.text.strip()
         
-        with st.spinner("🤖 Deconstructing query and building search plan..."):
-            prompt = create_search_plan_prompt(user_query)
-            plan = generate_from_gemini(prompt, is_json=True)
-            
-            if plan and isinstance(plan, dict):
-                if 'query_analysis' in plan and 'parallel_search_queries' in plan:
-                    st.session_state.search_plan = plan
-                    st.success("✅ Search plan generated successfully!")
-                else:
-                    st.error("🔴 Invalid search plan structure received from API.")
-            else:
-                st.error("🔴 Failed to generate search plan. Please try again.")
-    else:
-        st.warning("⚠️ Please enter a target query.")
+        if json_text.startswith("```json"):
+            json_text = json_text[7:]
+        if json_text.endswith("```"):
+            json_text = json_text[:-3]
+        json_text = json_text.strip()
+        
+        return json.loads(json_text)
+    except Exception as e:
+        st.error(f"Error analyzing batch: {e}")
+        return None
 
-if st.session_state.search_plan:
-    plan = st.session_state.search_plan
+# Initialize session state
+if 'queries_generated' not in st.session_state:
+    st.session_state.queries_generated = False
+if 'generated_queries' not in st.session_state:
+    st.session_state.generated_queries = []
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = []
+
+# Main execution
+if st.sidebar.button("🚀 Generate & Analyze"):
+    with st.spinner("Generating content gap queries..."):
+        queries = generate_content_gap_queries(user_query, mode)
     
-    with st.expander("View Deconstructed Query Analysis", expanded=False):
-        analysis = plan.get("query_analysis", {})
-        st.markdown(f"**Primary Entities:** {analysis.get('primary_entities', 'N/A')}")
-        st.markdown(f"**Key Attributes & Constraints:** {analysis.get('key_attributes_and_constraints', 'N/A')}")
-        st.markdown(f"**Underlying User Intent:** _{analysis.get('underlying_user_intent', 'N/A')}_")
-    
-    st.subheader("Ideal Content Plan (Fan-Out Queries)")
-    queries = plan.get("parallel_search_queries", [])
     if queries:
-        df = pd.DataFrame(queries)
-        st.dataframe(df, use_container_width=True)
-        st.success(f"✅ Generated {len(queries)} targeted queries for comprehensive content analysis.")
-    else:
-        st.warning("No search queries were generated.")
+        st.session_state.generated_queries = queries
+        st.session_state.queries_generated = True
+        st.session_state.analysis_results = []  # Reset previous analysis results
 
-st.markdown("---")
-st.header("Step 2: Analyze Your Content Against the Plan")
-st.markdown("Now, paste the URL of your blog post to see how well it aligns with the ideal content plan.")
-
-if st.session_state.search_plan:
-    blog_url = st.text_input("Enter your blog post URL", "", key="blog_url")
+# Display generated queries if they exist
+if st.session_state.queries_generated and st.session_state.generated_queries:
+    # Display generation details
+    if hasattr(st.session_state, 'analysis_details'):
+        details = st.session_state.analysis_details
+        st.success(f"✅ Generated {details.get('target_query_count', len(st.session_state.generated_queries))} queries")
+        st.info(f"📊 Reasoning: {details.get('reasoning_for_count', 'N/A')}")
     
-    if st.button("Analyze My Content 🔬", key="analyze_content"):
-        if not blog_url.strip():
-            st.warning("⚠️ Please enter a valid URL.")
-        elif not blog_url.startswith(('http://', 'https://')):
-            st.warning("⚠️ Please enter a valid URL starting with http:// or https://")
-        else:
-            with st.spinner(f"🔍 Scraping content from {blog_url}..."):
-                blog_text, error_msg = scrape_blog_content(blog_url)
+    # Display generated queries
+    st.subheader("📝 Generated Queries for Content Gap Analysis")
+    queries_df = pd.DataFrame(st.session_state.generated_queries)
+    st.dataframe(queries_df, use_container_width=True)
+    
+    # URL input for content scraping
+    st.subheader("🌐 Content Scraping & Analysis")
+    
+    # URL input options
+    url_input_method = st.radio("Choose URL input method:", ["Single URL", "Multiple URLs"])
+    
+    if url_input_method == "Single URL":
+        single_url = st.text_input(
+            "Enter URL to scrape and analyze:",
+            placeholder="https://example.com",
+            key="single_url_input"
+        )
+        urls_to_process = [single_url] if single_url.strip() else []
+    else:
+        urls_input = st.text_area(
+            "Enter URLs to scrape and analyze (one per line):",
+            placeholder="https://example1.com\nhttps://example2.com\nhttps://example3.com",
+            height=100,
+            key="multiple_urls_input"
+        )
+        urls_to_process = [url.strip() for url in urls_input.split('\n') if url.strip()]
+    
+    if st.button("🔍 Scrape & Analyze Content", key="scrape_analyze_btn"):
+        if urls_to_process:
+            # Store URLs in session state
+            st.session_state.urls_to_analyze = urls_to_process
             
-            if error_msg:
-                st.error(f"🔴 {error_msg}")
-                st.markdown("**Troubleshooting tips:**")
-                st.markdown("- Ensure the URL is accessible and doesn't require login")
-                st.markdown("- Some sites block automated scraping")
-                st.markdown("- Check if the URL is correct and loads in your browser")
-            elif blog_text:
-                st.success(f"✅ Content scraped successfully! ({len(blog_text)} characters)")
+            # Scrape content
+            scraped_contents = []
+            progress_bar = st.progress(0)
+            
+            for i, url in enumerate(urls_to_process):
+                with st.spinner(f"Scraping {url}..."):
+                    content = scrape_content(url)
+                    scraped_contents.append(content)
+                progress_bar.progress((i + 1) / len(urls_to_process))
+            
+            st.success(f"✅ Scraped {len(urls_to_process)} URLs")
+            
+            # Store scraped content in session state
+            st.session_state.scraped_contents = scraped_contents
+            
+            # Analyze in batches of 10 queries
+            batch_size = 10
+            queries = st.session_state.generated_queries
+            num_batches = math.ceil(len(queries) / batch_size)
+            
+            all_analysis_results = []
+            
+            for batch_num in range(num_batches):
+                start_idx = batch_num * batch_size
+                end_idx = min((batch_num + 1) * batch_size, len(queries))
+                batch_queries = queries[start_idx:end_idx]
                 
-                with st.expander("Preview Scraped Content", expanded=False):
-                    st.text_area("Content Preview", blog_text[:1000] + "..." if len(blog_text) > 1000 else blog_text, height=200)
+                with st.spinner(f"Analyzing batch {batch_num + 1}/{num_batches} ({len(batch_queries)} queries)..."):
+                    batch_results = analyze_content_gaps_batch(batch_queries, scraped_contents)
+                    if batch_results:
+                        all_analysis_results.append(batch_results)
                 
-                with st.spinner("🧠 Analyzing content gaps and providing recommendations..."):
-                    queries_df = pd.DataFrame(st.session_state.search_plan.get("parallel_search_queries", []))
-                    analysis_prompt = create_content_analysis_prompt(queries_df, blog_text, user_query)
-                    recommendations = generate_from_gemini(analysis_prompt, is_json=False)
-                
-                if recommendations:
-                    st.subheader("📊 Content Strategy Recommendations")
-                    st.markdown(recommendations)
-                else:
-                    st.error("🔴 Failed to generate content analysis. Please try again.")
-else:
-    st.info("📝 Complete Step 1 above to enable content analysis.")
+                if batch_num < num_batches - 1:
+                    time.sleep(1)
+            
+            st.session_state.analysis_results = all_analysis_results
+            
+        else:
+            st.warning("Please enter at least one URL to analyze.")
 
-st.markdown("---")
+if st.session_state.analysis_results:
+    st.subheader("📊 Content Gap Analysis Results")
+    
+    all_query_analyses = []
+    for batch_result in st.session_state.analysis_results:
+        all_query_analyses.extend(batch_result.get('batch_analysis', []))
+    
+    results_df = pd.DataFrame(all_query_analyses)
+    st.dataframe(results_df, use_container_width=True)
+    
+    st.subheader("💡 Key Insights")
+    for i, batch_result in enumerate(st.session_state.analysis_results):
+        if 'overall_insights' in batch_result:
+            insights = batch_result['overall_insights']
+            st.write(f"**Batch {i+1} Insights:**")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.write("**Strongest Areas:**")
+                for area in insights.get('strongest_areas', []):
+                    st.write(f"• {area}")
+            
+            with col2:
+                st.write("**Biggest Gaps:**")
+                for gap in insights.get('biggest_gaps', []):
+                    st.write(f"• {gap}")
+            
+            with col3:
+                st.write("**Quick Wins:**")
+                for win in insights.get('quick_wins', []):
+                    st.write(f"• {win}")
+            
+            st.markdown("---")
+    
+    # Export option
+    if st.button("📥 Export Results", key="export_btn"):
+        results_json = {
+            "original_query": user_query,
+            "analysis_mode": mode,
+            "generated_queries": st.session_state.generated_queries,
+            "scraped_urls": st.session_state.get('urls_to_analyze', []),
+            "analysis_results": st.session_state.analysis_results
+        }
+        
+        st.download_button(
+            label="💾 Download Analysis Results",
+            data=json.dumps(results_json, indent=2),
+            file_name=f"content_gap_analysis_{user_query[:30].replace(' ', '_')}.json",
+            mime="application/json",
+            key="download_btn"
+        )
+
+if st.sidebar.checkbox("Show Debug Info"):
+    st.sidebar.subheader("Debug Information")
+    if hasattr(st.session_state, 'analysis_details'):
+        st.sidebar.json(st.session_state.analysis_details)
+    if hasattr(st.session_state, 'all_queries'):
+        st.sidebar.write(f"Total queries generated: {len(st.session_state.all_queries)}")
