@@ -19,7 +19,7 @@ mode = st.sidebar.radio("Analysis Mode", ["Simple Analysis", "Deep Analysis"])
 
 if gemini_key:
     genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel("gemini-1.5-flash-latest")
+    model = genai.GenerativeModel("gemini-2.5-flash")
 else:
     st.error("Please enter your Gemini API Key to proceed.")
     st.stop()
@@ -32,45 +32,44 @@ def CONTENT_GAP_QUERY_PROMPT(q, mode):
         num_queries_instruction = (
             f"Analyze the user's query: \"{q}\" for content gap analysis. "
             f"Generate **at least {min_queries_simple}** queries that would help identify content gaps. "
-            f"Focus on variations that competitors might rank for but current content might miss. "
+            f"Focus on variations that expand on the core topic. "
             f"Include long-tail variations, question-based queries, and related search intents."
         )
     else:  # Deep Analysis
         num_queries_instruction = (
             f"Analyze the user's query: \"{q}\" for comprehensive content gap analysis. "
             f"Generate **at least {min_queries_complex}** queries for deep content analysis. "
-            f"Include semantic variations, user journey stages, related topics, and competitive angles. "
+            f"Include semantic variations, user journey stages, related topics, and technical details. "
             f"Consider informational, transactional, and navigational search intents."
         )
 
+    # CHANGED: I've updated the instructions to prevent competitor-focused queries.
     return (
-        f"You are generating queries for content gap analysis and competitive research.\n"
-        f"Original query: \"{q}\". Analysis mode: \"{mode}\".\n\n"
-        f"**Task: Determine optimal number of queries and generate them for content analysis.**\n"
+        f"You are a content strategy assistant generating queries to help deepen and expand content on a specific topic.\n"
+        f"Original topic: \"{q}\". Analysis mode: \"{mode}\".\n\n"
+        f"**Task: Determine an optimal number of queries and generate them for an in-depth content analysis.**\n"
         f"{num_queries_instruction}\n\n"
         f"Each query should help identify potential content gaps by covering:\n"
-        f"1. Semantic Variations - Different ways to express the same intent\n"
-        f"2. Related Questions - What users commonly ask about this topic\n"
-        f"3. Long-tail Keywords - Specific, detailed queries\n"
-        f"4. Comparison Queries - Competitive analysis angles\n"
-        f"5. Problem-Solution Queries - Pain points and solutions\n"
-        f"6. Feature-Specific Queries - Detailed aspects of the topic\n\n"
-        f"Focus on queries that would reveal content opportunities when analyzing competitor content.\n"
-        f"Avoid queries requiring real-time data or personal information.\n\n"
+        f"1. Semantic Variations - Different ways to express the same intent.\n"
+        f"2. Related Questions - What users commonly ask about this topic.\n"
+        f"3. Long-tail Keywords - Specific, detailed queries that reveal user needs.\n"
+        f"4. Feature/Aspect Queries - Queries that dive into specific features, components, or use cases of the primary topic.\n"
+        f"5. Problem/Solution Queries - Queries focused on the problems the topic solves.\n\n"
+        f"**IMPORTANT CONSTRAINT:** Avoid generating queries that compare the primary topic with external competitors (e.g., avoid queries like \"Product X vs Competitor Y\"). The goal is to deepen the content on the primary topic itself, not to create competitor comparison articles.\n\n"
         f"Return valid JSON in this format:\n"
         f"{{\n"
         f"  \"analysis_details\": {{\n"
         f"    \"target_query_count\": 12,\n"
-        f"    \"reasoning_for_count\": \"Explanation of why this number was chosen\",\n"
-        f"    \"analysis_focus\": \"Content gap identification and competitive analysis\"\n"
+        f"    \"reasoning_for_count\": \"Explanation of why this number was chosen based on the topic's complexity\",\n"
+        f"    \"analysis_focus\": \"Deepening content on the primary topic and identifying missed sub-topics.\"\n"
         f"  }},\n"
         f"  \"content_gap_queries\": [\n"
         f"    {{\n"
-        f"      \"query\": \"Example query\",\n"
-        f"      \"type\": \"semantic_variation\",\n"
+        f"      \"query\": \"Example query about the primary topic\",\n"
+        f"      \"type\": \"long_tail_keyword\",\n"
         f"      \"search_intent\": \"informational\",\n"
         f"      \"gap_potential\": \"high\",\n"
-        f"      \"reasoning\": \"Why this query helps identify content gaps\"\n"
+        f"      \"reasoning\": \"This query helps to check for depth in a specific area of the main topic.\"\n"
         f"    }}\n"
         f"  ]\n"
         f"}}"
@@ -137,7 +136,7 @@ def analyze_content_gaps_batch(queries_batch, scraped_contents):
     queries_text = "\n".join([f"- {q['query']}" for q in queries_batch])
     
     analysis_prompt = f"""
-    Analyze the following scraped content against these queries to identify content gaps:
+    Analyze the following scraped content against this list of queries. The goal is to find what's missing from the content.
 
     QUERIES TO ANALYZE:
     {queries_text}
@@ -145,45 +144,65 @@ def analyze_content_gaps_batch(queries_batch, scraped_contents):
     SCRAPED CONTENT:
     {content_summary}
 
-    For each query, determine:
-    1. Coverage Score (0-10): How well the content covers this query
-    2. Content Gaps: What specific information is missing
-    3. Optimization Opportunities: How to improve content for this query
-    4. Competitive Advantage: Potential to outrank competitors
+    For each query, perform the following analysis:
+    1. Coverage Score (0-10): A score of 0 means the query is not addressed at all. A score of 10 means it is covered completely.
+    2. Gaps Identified: Be specific and actionable. Instead of a generic 'information is missing', describe the missing details precisely. For example: "Lacks a step-by-step guide for implementation", "Does not explain the underlying security protocols", or "No mention of pricing or cost implications".
+    3. Optimization Opportunities: Suggest concrete actions to fill the identified gaps. For example: "Add a new H2 section titled 'How to set up X'", "Create a table comparing the different pricing tiers".
 
-    Return JSON format:
+    Return the analysis in a valid JSON format only, without any other text.
     {{
         "batch_analysis": [
             {{
                 "query": "query text",
                 "coverage_score": 7,
-                "gaps_identified": ["gap1", "gap2"],
-                "optimization_opportunities": ["opportunity1", "opportunity2"],
-                "competitive_potential": "high/medium/low"
+                "gaps_identified": ["The content mentions feature X but doesn't explain how it works.", "The practical benefits for small businesses are not detailed."],
+                "optimization_opportunities": ["Add a 'How it Works' subsection with a diagram.", "Include a case study or example focused on small business use cases."],
+                "competitive_potential": "high"
             }}
         ],
         "overall_insights": {{
-            "strongest_areas": ["area1", "area2"],
-            "biggest_gaps": ["gap1", "gap2"],
-            "quick_wins": ["win1", "win2"]
+            "strongest_areas": ["General overview of the topic", "Definition of key terms"],
+            "biggest_gaps": ["Practical implementation guides", "Advanced use cases"],
+            "quick_wins": ["Add a FAQ section to address common questions.", "Include a summary table at the beginning."]
         }}
     }}
     """
     
-    try:
-        response = model.generate_content(analysis_prompt)
-        json_text = response.text.strip()
-        
-        if json_text.startswith("```json"):
-            json_text = json_text[7:]
-        if json_text.endswith("```"):
-            json_text = json_text[:-3]
-        json_text = json_text.strip()
-        
-        return json.loads(json_text)
-    except Exception as e:
-        st.error(f"Error analyzing batch: {e}")
-        return None
+    # --- NEW: Robust parsing with retry logic ---
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(analysis_prompt)
+            raw_text = response.text.strip()
+            
+            # 1. More Aggressive JSON Cleaning: Find the first '{' and last '}'
+            match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if not match:
+                # This error is raised if no JSON-like structure is found at all
+                raise ValueError("No valid JSON object found in the model's response.")
+            
+            json_text = match.group(0)
+            
+            # 2. Attempt to parse the cleaned text
+            return json.loads(json_text)
+
+        except (json.JSONDecodeError, ValueError) as e:
+            st.warning(f"Batch analysis failed on attempt {attempt + 1}/{max_retries}. Retrying... Error: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)  # Wait for 2 seconds before retrying
+            else:
+                st.error(f"Error analyzing batch after {max_retries} attempts. This batch will be skipped.")
+                # For debugging, show the faulty text that could not be parsed
+                st.text("Raw response that caused the final error:")
+                st.code(raw_text, language='text')
+                return None  # Return None after all retries have failed
+        except Exception as e:
+            # Catch any other unexpected errors from the API call itself
+            st.error(f"An unexpected API error occurred during batch analysis: {e}")
+            return None # Stop trying on other API errors
+
+    return None
+
 
 # Initialize session state
 if 'queries_generated' not in st.session_state:
