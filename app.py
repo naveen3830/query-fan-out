@@ -11,160 +11,170 @@ import math
 
 st.set_page_config(page_title="Content Gap Analyzer", layout="wide")
 st.title("🔍 Query-fan-out simulator & Content Analysis")
+st.markdown("This tool generates strategic research queries and analyzes multiple URLs to find content gaps, suggesting the best page to optimize for each topic.")
 
 st.sidebar.header("🛠️ Configuration & Setup")
 
-with st.sidebar.expander(" How to get a Gemini API Key?"):
+with st.sidebar.expander("📖 How to get a Gemini API Key?"):
     st.markdown("""
     1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey).
     2. Sign in with your Google account.
     3. Click **Create API Key** and copy it.
-    4. Paste the key in the field above.
+    4. Paste the key in the field below.
     """)
 
-gemini_key = st.sidebar.text_input(" Gemini API Key", type="password")
-user_query = st.sidebar.text_area("Enter your query", "what is quantum key distribution?", height=120)
-mode = st.sidebar.radio("🔬 Analysis Mode", ["Simple Analysis", "Deep Analysis"])
+if 'gemini_api_key' not in st.session_state:
+    st.session_state.gemini_api_key = ''
+
+st.session_state.gemini_api_key = st.sidebar.text_input("🔑 Gemini API Key", type="password", value=st.session_state.gemini_api_key)
+user_query = st.sidebar.text_area("Enter your core topic or keyword", "what is quantum key distribution?", height=120)
+mode = st.sidebar.radio("🔬 Analysis Mode", ["Simple Analysis", "Deep Analysis"], help="Deep Analysis generates more queries for a more thorough investigation.")
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("Advanced Scraping Settings")
+char_limit = st.sidebar.slider(
+    "Scraping Character Limit per URL",
+    min_value=1000,
+    max_value=20000,
+    value=20000,
+    step=1000,
+    help="Set the maximum number of characters to scrape from each URL. A higher limit provides more context but may increase processing time and cost."
+)
+st.sidebar.markdown("---")
 
-if gemini_key:
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel("gemini-2.5-pro") # can use gemini-2.5-flash
+if st.session_state.gemini_api_key:
+    try:
+        genai.configure(api_key=st.session_state.gemini_api_key)
 
+        model = genai.GenerativeModel("gemini-2.5-pro")
+    except Exception as e:
+        st.error(f"Failed to configure Gemini API: {e}")
+        st.stop()
 else:
-    st.error("Please enter your Gemini API Key to proceed.")
+    st.warning("Please enter your Gemini API Key in the sidebar to begin.")
     st.stop()
 
 def CONTENT_GAP_QUERY_PROMPT(q, mode):
     num_queries = 10 if mode == "Simple Analysis" else 20
     query_count_instruction = f"Generate exactly {num_queries} queries."
 
-    return f"""Your goal is to act as a research strategist. Given a topic, you will generate a set of sophisticated and diverse web search queries. These queries are for an automated research tool that will synthesize the findings.
+    return f"""
+    Your goal is to act as a research strategist. Given a topic, you will generate a set of sophisticated and diverse web search queries. These queries are for an automated research tool that will synthesize the findings.
 
-Original Topic: "{q}"
+    Original Topic: "{q}"
 
-**Instructions:**
-1.  **Generate Diverse Queries:** Create a set of queries that break down the original topic into its most important, distinct components.
-2.  **Number of Queries:** {query_count_instruction}
-3.  **Avoid Redundancy:** Do not generate multiple similar queries. Each query must target a unique angle or sub-topic to ensure comprehensive coverage.
-4.  **Cover Different Facets:** The set of queries should cover a range of aspects, such as:
-    -   Core definitions and foundational concepts ("what is...").
-    -   Underlying mechanisms or technical processes ("how does... work").
-    -   Practical applications and real-world use cases.
-    -   Common challenges, limitations, or problems.
-    -   Comparisons of internal components or methodologies (e.g., "quantum key distribution protocols comparison," NOT "Product X vs Competitor Y").
-5.  **Categorize Each Query:** For each generated query, you must also provide its type and search intent as specified in the JSON format below.
+    **Instructions:**
+    1.  **Generate Diverse Queries:** Create a set of queries that break down the original topic into its most important, distinct components.
+    2.  **Number of Queries:** {query_count_instruction}
+    3.  **Avoid Redundancy:** Each query must target a unique angle or sub-topic.
+    4.  **Cover Different Facets:** The queries should cover a range of aspects: foundational concepts, technical processes, applications, challenges, and internal comparisons (e.g., different protocols or methods).
+    5.  **Categorize Each Query:** Provide a type and search intent for each query.
 
-**IMPORTANT CONSTRAINT:** The goal is to deepen the content on the primary topic itself, not to create competitor comparison articles. Avoid queries that compare the topic with external brands or competitors.
+    **IMPORTANT CONSTRAINT:** The goal is to deepen content on the primary topic, not to create competitor comparison articles. Avoid queries that compare the topic with external brands or competitors.
 
-**Output Format:**
-Return a single, valid JSON object. Do not add any text before or after the JSON object. The JSON must adhere to this exact structure:
-{{
-    "analysis_details": {{
-        "target_query_count": {num_queries},
-        "reasoning_for_count": "The number of queries is based on the selected '{mode}' to ensure comprehensive topic coverage by breaking it down into distinct facets.",
-        "analysis_focus": "To create a diverse set of queries for comprehensive research, covering foundational concepts, technical details, applications, and challenges."
-    }},
-    "content_gap_queries": [
-        {{
-            "query": "Example query about a specific aspect of the main topic.",
-            "type": "question_based",
-            "search_intent": "informational",
-            "gap_potential": "high",
-            "reasoning": "This query targets a fundamental aspect of the topic that is essential for a complete understanding."
-        }}
-    ]
-}}
-"""
+    **Output Format:**
+    Return a single, valid JSON object. Do not add any text before or after the JSON.
+    {{
+        "analysis_details": {{
+            "target_query_count": {num_queries},
+            "reasoning_for_count": "The number of queries is based on the selected '{mode}' to ensure comprehensive topic coverage.",
+            "analysis_focus": "To create a diverse set of queries for comprehensive research, covering foundational concepts, technical details, applications, and challenges."
+        }},
+        "content_gap_queries": [
+            {{
+                "query": "Example query about a specific aspect of the main topic.",
+                "type": "question_based",
+                "search_intent": "informational"
+            }}
+        ]
+    }}
+    """
 
 def generate_content_gap_queries(query, mode):
+    """Calls the Gemini API to generate queries and handles response parsing."""
     prompt = CONTENT_GAP_QUERY_PROMPT(query, mode)
     try:
         response = model.generate_content(prompt)
-        json_text = response.text.strip()
+        json_match = re.search(r'```json\s*(\{.*?\})\s*```', response.text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r'(\{.*?\})', response.text, re.DOTALL)
         
-        if json_text.startswith("```json"):
-            json_text = json_text[7:]
-        if json_text.endswith("```"):
-            json_text = json_text[:-3]
-        json_text = json_text.strip()
-
+        json_text = json_match.group(1)
         data = json.loads(json_text)
-        analysis_details = data.get("analysis_details", {})
-        generated_queries = data.get("content_gap_queries", [])
+        
+        st.session_state.analysis_details = data.get("analysis_details", {})
+        return data.get("content_gap_queries", [])
 
-        st.session_state.analysis_details = analysis_details
-        st.session_state.all_queries = generated_queries
-
-        return generated_queries
-    except json.JSONDecodeError as e:
-        st.error(f"🔴 Failed to parse response as JSON: {e}")
-        st.text("Raw response:")
-        st.code(json_text if 'json_text' in locals() else "N/A", language='json')
+    except (json.JSONDecodeError, AttributeError) as e:
+        st.error(f"🔴 Failed to parse response as JSON. Error: {e}")
+        st.text("Raw response from model:")
+        st.code(response.text if 'response' in locals() else "N/A", language='text')
         return None
     except Exception as e:
-        st.error(f"🔴 Error during query generation: {e}")
+        st.error(f"🔴 An unexpected error occurred during query generation: {e}")
         return None
 
-def scrape_content(url):
+def scrape_content(url, character_limit):
+    """Scrapes and cleans text content from a URL."""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        for element in soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
             element.decompose()
         
         text = soup.get_text(separator=' ', strip=True)
-        
-        return text[:5000] if len(text) > 5000 else text
-    except Exception as e:
-        return f"Error scraping {url}: {str(e)}"
+        return {"url": url, "content": text[:character_limit]}
+    
+    except requests.exceptions.RequestException as e:
+        st.warning(f"Could not scrape {url}: {e}")
+        return {"url": url, "content": f"Error: Failed to retrieve content. {e}"}
 
-def analyze_content_gaps_batch(queries_batch, scraped_contents):
-    if not scraped_contents:
-        return None
-    
-    content_summary = "\n\n".join([f"URL {i+1} Content Snippet:\n{content[:1000]}..." 
-                                   for i, content in enumerate(scraped_contents) if content])
-    
+def analyze_content_gaps_batch(queries_batch, scraped_data, character_limit):
+    """Analyzes content gaps for a batch of queries against multiple URLs."""
+    if not scraped_data: return None
+
+    content_summary = "\n\n---\n\n".join(
+        [f"CONTENT FROM: {item['url']}\n\n{item['content'][:2000]}..." for item in scraped_data if item['content']]
+    )
     queries_text = "\n".join([f"- {q['query']}" for q in queries_batch])
-    
+
     analysis_prompt = f"""
-    Analyze the following scraped content against this list of queries. The goal is to find what's missing from the content.
+    You are an expert Content Gap Analyst. Your task is to analyze content from multiple URLs against a list of queries. The content provided was scraped up to the first {character_limit} characters.
 
-    QUERIES TO ANALYZE:
-    {queries_text}
-
-    SCRAPED CONTENT:
+    **URLs AND THEIR CONTENT SNIPPETS:**
     {content_summary}
 
-    For each query, perform the following analysis:
-    1. Coverage Score (0-10): A score of 0 means the query is not addressed at all. A score of 10 means it is covered completely.
-    2. Gaps Identified: Be specific and actionable. Instead of a generic 'information is missing', describe the missing details precisely. For example: "Lacks a step-by-step guide for implementation", "Does not explain the underlying security protocols", or "No mention of pricing or cost implications".
-    3. Optimization Opportunities: Suggest concrete actions to fill the identified gaps. For example: "Add a new H2 section titled 'How to set up X'", "Create a table comparing the different pricing tiers".
+    **RESEARCH QUERIES TO ANALYZE:**
+    {queries_text}
 
-    Return the analysis in a valid JSON format only, without any other text.
+    **INSTRUCTIONS:**
+    For each query, evaluate how well it is covered by the content from **each** of the provided URLs. Return your analysis as a single, valid JSON object.
+
+    - **coverage_score (0-10):** 0 means not addressed; 10 means fully covered.
+    - **gap_description:** Be specific. Instead of "information is missing," say "Lacks a step-by-step guide for implementation."
+    - **optimization_suggestion:** Give a concrete action, e.g., "Add a new H2 section titled 'How to set up X'."
+
+    **JSON OUTPUT STRUCTURE:**
     {{
-        "batch_analysis": [
+      "batch_analysis": [
+        {{
+          "query": "The text of the research query.",
+          "analysis_per_url": [
             {{
-                "query": "query text",
-                "coverage_score": 7,
-                "gaps_identified": ["The content mentions feature X but doesn't explain how it works.", "The practical benefits for small businesses are not detailed."],
-                "optimization_opportunities": ["Add a 'How it Works' subsection with a diagram.", "Include a case study or example focused on small business use cases."],
-                "competitive_potential": "high"
+              "url": "https://example.com/page-a",
+              "coverage_score": 8,
+              "gap_description": "The topic is mentioned, but lacks depth on technical aspects.",
+              "optimization_suggestion": "Expand the section with more technical details and diagrams."
             }}
-        ],
-        "overall_insights": {{
-            "strongest_areas": ["General overview of the topic", "Definition of key terms"],
-            "biggest_gaps": ["Practical implementation guides", "Advanced use cases"],
-            "quick_wins": ["Add a FAQ section to address common questions.", "Include a summary table at the beginning."]
+          ]
         }}
+      ]
     }}
     """
     
@@ -173,37 +183,102 @@ def analyze_content_gaps_batch(queries_batch, scraped_contents):
         try:
             response = model.generate_content(analysis_prompt)
             raw_text = response.text.strip()
-            
             match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-            if not match:
-                raise ValueError("No valid JSON object found in the model's response.")
-            
+            if not match: raise ValueError("No valid JSON object found in model's response.")
             json_text = match.group(0)
-            
             return json.loads(json_text)
-
         except (json.JSONDecodeError, ValueError) as e:
-            st.warning(f"Batch analysis failed on attempt {attempt + 1}/{max_retries}. Retrying... Error: {e}")
+            st.warning(f"Analysis failed on attempt {attempt + 1}. Retrying... Error: {e}")
             if attempt < max_retries - 1:
-                time.sleep(2) 
+                time.sleep(2 * (attempt + 1))
             else:
-                st.error(f"Error analyzing batch after {max_retries} attempts. This batch will be skipped.")
+                st.error(f"Error analyzing batch after {max_retries} attempts. Skipping.")
                 st.code(raw_text, language='text')
                 return None
         except Exception as e:
-            st.error(f"An unexpected API error occurred during batch analysis: {e}")
+            st.error(f"An unexpected API error during analysis: {e}")
             return None
 
-    return None
+def process_and_display_results(analysis_results):
+    """Processes raw analysis data to create final DataFrames and display results."""
+    st.header("📊 Content Gap Analysis Results", anchor=False)
+    
+    summary_results = []
+    detailed_results_flat = []
+    all_detailed_analyses = []
 
-if 'queries_generated' not in st.session_state:
-    st.session_state.queries_generated = False
-if 'generated_queries' not in st.session_state:
-    st.session_state.generated_queries = []
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = []
+    for batch_result in analysis_results:
+        for query_analysis in batch_result.get('batch_analysis', []):
+            all_detailed_analyses.append(query_analysis)
+            query_text = query_analysis.get('query')
+            analysis_per_url = query_analysis.get('analysis_per_url', [])
+            
+            if not analysis_per_url: continue
 
-if st.sidebar.button("🚀 Generate & Analyze"):
+            for url_detail in analysis_per_url:
+                detailed_results_flat.append({
+                    "Query": query_text,
+                    "URL Analyzed": url_detail.get('url'),
+                    "Coverage Score": url_detail.get('coverage_score', 0),
+                    "Identified Gap": url_detail.get('gap_description', 'N/A'),
+                    "Optimization Suggestion": url_detail.get('optimization_suggestion', 'N/A')
+                })
+
+            best_target = max(analysis_per_url, key=lambda x: x.get('coverage_score', 0))
+            summary_results.append({
+                "Query": query_text,
+                "Target for Optimization": best_target.get('url'),
+                "Highest Coverage Score": best_target.get('coverage_score', 0),
+                "Identified Gap": best_target.get('gap_description', 'N/A'),
+                "Optimization Suggestion": best_target.get('optimization_suggestion', 'N/A')
+            })
+
+    if not summary_results:
+        st.warning("Analysis did not return any actionable results to display.")
+        return
+
+    st.subheader("Summary: Best Page to Optimize per Query", anchor=False)
+    summary_df = pd.DataFrame(summary_results)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    
+    summary_csv = summary_df.to_csv(index=False).encode('utf-8')
+    detailed_df = pd.DataFrame(detailed_results_flat)
+    detailed_csv = detailed_df.to_csv(index=False).encode('utf-8')
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="💾 Download Summary Analysis (CSV)",
+            data=summary_csv,
+            file_name=f"content_gap_summary_{user_query.replace(' ','_')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    with col2:
+        st.download_button(
+            label="💾 Download Detailed Analysis (CSV)",
+            data=detailed_csv,
+            file_name=f"content_gap_detailed_{user_query.replace(' ','_')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    
+    with st.expander("🔬 Show Detailed Analysis (All URLs)"):
+        for analysis in all_detailed_analyses:
+            st.markdown(f"#### Query: {analysis.get('query', 'N/A')}")
+            for url_detail in sorted(analysis.get('analysis_per_url', []), key=lambda x: x.get('coverage_score', 0), reverse=True):
+                st.markdown(f"**URL:** `{url_detail.get('url')}`")
+                score = url_detail.get('coverage_score', 'N/A')
+                st.markdown(f"**Coverage Score:** **{score}** / 10")
+                st.markdown(f"**Gap:** {url_detail.get('gap_description', 'N/A')}")
+                st.markdown(f"**Suggestion:** {url_detail.get('optimization_suggestion', 'N/A')}")
+                st.divider()
+
+if 'queries_generated' not in st.session_state: st.session_state.queries_generated = False
+if 'generated_queries' not in st.session_state: st.session_state.generated_queries = []
+if 'analysis_results' not in st.session_state: st.session_state.analysis_results = []
+
+if st.sidebar.button("🚀 Generate Queries", use_container_width=True):
     with st.spinner("Generating diverse search queries..."):
         queries = generate_content_gap_queries(user_query, mode)
     
@@ -211,123 +286,57 @@ if st.sidebar.button("🚀 Generate & Analyze"):
         st.session_state.generated_queries = queries
         st.session_state.queries_generated = True
         st.session_state.analysis_results = []
-
-if st.session_state.queries_generated and st.session_state.generated_queries:
-    if 'analysis_details' in st.session_state:
-        details = st.session_state.analysis_details
-        st.success(f"✅ Generated {details.get('target_query_count', len(st.session_state.generated_queries))} queries")
-        st.info(f"📊 Reasoning: {details.get('reasoning_for_count', 'N/A')}")
-    
-    st.subheader("📝 Generated Queries for Comprehensive Research")
-    queries_df = pd.DataFrame(st.session_state.generated_queries)
-    st.dataframe(queries_df, use_container_width=True)
-    
-    st.subheader("🌐 Content Scraping & Analysis")
-    
-    url_input_method = st.radio("Choose URL input method:", ["Single URL", "Multiple URLs"])
-    
-    if url_input_method == "Single URL":
-        single_url = st.text_input(
-            "Enter URL to scrape and analyze:",
-            placeholder="https://example.com",
-            key="single_url_input"
-        )
-        urls_to_process = [single_url] if single_url.strip() else []
+        st.success(f"✅ Generated {len(queries)} queries.")
+        st.rerun()
     else:
-        urls_input = st.text_area(
-            "Enter URLs to scrape and analyze (one per line):",
-            placeholder="https://example1.com\nhttps://example2.com",
-            height=100,
-            key="multiple_urls_input"
-        )
-        urls_to_process = [url.strip() for url in urls_input.split('\n') if url.strip()]
+        st.error("Failed to generate queries. Please check API key and try again.")
+
+if st.session_state.queries_generated:
+    st.header("📝 Generated Queries", anchor=False)
+    st.dataframe(pd.DataFrame(st.session_state.generated_queries), use_container_width=True, hide_index=True)
     
-    if st.button("🔍 Scrape & Analyze Content", key="scrape_analyze_btn"):
-        if urls_to_process:
-            st.session_state.urls_to_analyze = urls_to_process
+    st.header("🌐 Enter URLs for Analysis", anchor=False)
+    urls_input = st.text_area(
+        "Enter URLs to analyze (one per line).",
+        placeholder="https://example.com/topic-a\nhttps://example.com/related-topic-b",
+        height=100,
+        key="multiple_urls_input"
+    )
+    urls_to_process = [url.strip() for url in urls_input.split('\n') if url.strip() and url.startswith('http')]
+    
+    if st.button("🔍 Scrape & Analyze Content", key="scrape_analyze_btn", disabled=not urls_to_process, use_container_width=True):
+        with st.status("Running Full Analysis...", expanded=True) as status:
+            status.update(label=f"Step 1/3: Scraping content (up to {char_limit} chars/URL)...")
+            scraped_data = [scrape_content(url, char_limit) for url in urls_to_process]
+            time.sleep(1)
             
-            scraped_contents = []
-            progress_bar = st.progress(0, text="Scraping URLs...")
-            
-            for i, url in enumerate(urls_to_process):
-                with st.spinner(f"Scraping {url}..."):
-                    content = scrape_content(url)
-                    scraped_contents.append(content)
-                progress_bar.progress((i + 1) / len(urls_to_process), text=f"Scraped {url}")
-            
-            st.success(f"✅ Scraped {len(urls_to_process)} URLs")
-            
-            st.session_state.scraped_contents = scraped_contents
-            
-            batch_size = 10
+            status.update(label=f"Step 2/3: Analyzing content against {len(st.session_state.generated_queries)} queries...")
             queries = st.session_state.generated_queries
+            batch_size = 5
             num_batches = math.ceil(len(queries) / batch_size)
             
+            progress_bar = st.progress(0)
             all_analysis_results = []
-            
-            analysis_progress = st.progress(0, text="Starting analysis...")
-            for batch_num in range(num_batches):
-                start_idx = batch_num * batch_size
-                end_idx = min((batch_num + 1) * batch_size, len(queries))
+            for i in range(num_batches):
+                start_idx, end_idx = i * batch_size, (i + 1) * batch_size
                 batch_queries = queries[start_idx:end_idx]
                 
-                analysis_progress.progress(batch_num / num_batches, text=f"Analyzing batch {batch_num + 1}/{num_batches}...")
+                status.update(label=f"Step 2/3: Analyzing batch {i + 1}/{num_batches}...")
+                batch_results = analyze_content_gaps_batch(batch_queries, scraped_data, char_limit)
+                if batch_results:
+                    all_analysis_results.append(batch_results)
                 
-                with st.spinner(f"Analyzing batch {batch_num + 1}/{num_batches} ({len(batch_queries)} queries)..."):
-                    batch_results = analyze_content_gaps_batch(batch_queries, scraped_contents)
-                    if batch_results:
-                        all_analysis_results.append(batch_results)
-                
-                if batch_num < num_batches - 1:
-                    time.sleep(1)
-            
-            analysis_progress.progress(1.0, text="Analysis complete!")
+                progress_bar.progress((i + 1) / num_batches)
+                time.sleep(2)
+
             st.session_state.analysis_results = all_analysis_results
-            
-        else:
-            st.warning("Please enter at least one URL to analyze.")
+            status.update(label="✅ Analysis Complete!", state="complete")
+        st.rerun()
 
 if st.session_state.analysis_results:
-    st.subheader("📊 Content Gap Analysis Results")
-    
-    all_query_analyses = []
-    for batch_result in st.session_state.analysis_results:
-        all_query_analyses.extend(batch_result.get('batch_analysis', []))
-    
-    # Remove Competitive Potential from analyses for display/export
-    for analysis in all_query_analyses:
-        if 'competitive_potential' in analysis:
-            del analysis['competitive_potential']
-    
-    # Display the table first
-    results_df = pd.DataFrame(all_query_analyses)
-    st.dataframe(results_df, use_container_width=True)
-    
-    # Single expander for all details
-    with st.expander("Show Detailed Analysis for All Queries"):
-        for i, analysis in enumerate(all_query_analyses):
-            st.markdown(f"### Query {i+1}: {analysis.get('query', 'N/A')}")
-            st.markdown(f"**Coverage Score:** {analysis.get('coverage_score', 'N/A')}/10")
-            st.markdown("**Gaps Identified:**")
-            for gap in analysis.get('gaps_identified', []):
-                st.write(f"- {gap}")
-            st.markdown("**Optimization Opportunities:**")
-            for opp in analysis.get('optimization_opportunities', []):
-                st.write(f"- {opp}")
-            st.markdown("---")
-    
-    # CSV download button (single click)
-    csv_data = results_df.to_csv(index=False)
-    st.download_button(
-        label="💾 Download Analysis Results as CSV",
-        data=csv_data,
-        file_name="content_gap_analysis_results.csv",
-        mime="text/csv"
-    )
+    process_and_display_results(st.session_state.analysis_results)
 
 if st.sidebar.checkbox("Show Debug Info"):
     st.sidebar.subheader("Debug Information")
-    if 'analysis_details' in st.session_state:
-        st.sidebar.json(st.session_state.analysis_details)
-    if 'all_queries' in st.session_state:
-        st.sidebar.write(f"Total queries generated: {len(st.session_state.all_queries)}")
+    with st.sidebar.expander("Session State"):
+        st.json({k: v for k, v in st.session_state.to_dict().items() if k != 'gemini_api_key'})

@@ -10,3 +10,5 @@ wheels/
 .venv
 .env
 .qodo
+reddit_scrapper.py
+app1.py
